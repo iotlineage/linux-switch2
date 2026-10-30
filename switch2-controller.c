@@ -56,6 +56,10 @@ int switch2_controller_activate_locked(struct switch2_controller *ns2)
     if (ret)
         goto err_player;
 
+    ret = switch2_battery_create(ns2);
+    if (ret)
+        goto err_ff;
+
     if (ns2->transport) {
         ret = switch2_init_advance_locked(ns2);
         if (ret)
@@ -65,6 +69,7 @@ int switch2_controller_activate_locked(struct switch2_controller *ns2)
     return 0;
 
 err_ff:
+    switch2_battery_destroy(ns2);
     switch2_ff_destroy(ns2);
 
 err_player:
@@ -88,6 +93,7 @@ void switch2_controller_deactivate(struct switch2_controller *ns2)
     mutex_unlock(&ns2->lock);
 
     switch2_input_destroy(ns2);
+    switch2_battery_destroy(ns2);
     switch2_ff_destroy(ns2);
     switch2_release_player_id(ns2);
 

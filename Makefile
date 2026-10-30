@@ -8,6 +8,7 @@ hid-switch2-y := \
 	switch2-init.o \
 	switch2-protocol.o \
 	switch2-input.o \
+	switch2-battery.o \
 	switch2-jc1.o \
 	switch2-ff.o \
 	switch2-gatt.o

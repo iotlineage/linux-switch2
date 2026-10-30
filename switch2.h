@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
+#include <linux/power_supply.h>
 #include "hid-ids.h"
 
 /* BTN_GRIPL/BTN_GRIPR landed after some supported kernel branches. */
@@ -301,6 +302,14 @@ struct switch2_controller {
 	struct delayed_work init_work;
 	struct input_dev __rcu *input;
 	struct input_dev __rcu *mouse_input;
+	spinlock_t battery_lock;
+	struct power_supply *battery;
+	struct power_supply_desc battery_desc;
+	char battery_name[80];
+	bool battery_valid;
+	u8 battery_power;
+	unsigned long battery_updated;
+	bool common_input_active;
 	bool mouse_surface_active;
 	u8 mouse_surface_enter_count;
 	u8 mouse_surface_exit_count;
@@ -387,6 +396,9 @@ int switch2_protocol_handle_reply(struct switch2_controller *controller,
 	const uint8_t *message, size_t length);
 
 int switch2_input_create(struct switch2_controller *ns2);
+int switch2_battery_create(struct switch2_controller *ns2);
+void switch2_battery_update(struct switch2_controller *ns2, u8 power);
+void switch2_battery_destroy(struct switch2_controller *ns2);
 int switch2_mouse_input_create(struct switch2_controller *ns2);
 
 int switch2_input_receive_state(struct switch2_controller *controller,

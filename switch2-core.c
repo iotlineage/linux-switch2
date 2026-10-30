@@ -118,6 +118,7 @@ struct switch2_controller *switch2_controller_get(const char *phys)
         return ERR_PTR(-ENOMEM);
 
     mutex_init(&ns2->lock);
+    spin_lock_init(&ns2->battery_lock);
     switch2_init_work_init(ns2);
     INIT_LIST_HEAD(&ns2->entry);
     refcount_set(&ns2->refcount, 1);
@@ -145,6 +146,7 @@ void switch2_controller_put(struct switch2_controller *ns2)
 
     switch2_init_work_cancel(ns2);
     switch2_input_destroy(ns2);
+    switch2_battery_destroy(ns2);
     mutex_destroy(&ns2->lock);
     kfree(ns2);
 }

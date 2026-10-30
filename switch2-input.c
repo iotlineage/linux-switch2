@@ -983,6 +983,12 @@ int switch2_input_receive_ble_side(struct switch2_controller *ns2,
         !switch2_controller_is_ble(ns2))
         return 0;
 
+    /* Keep battery current even after common reports own motion/mouse input.
+     * Side Power Info is byte 1 of the GATT value, byte 2 with the HID ID. */
+    switch2_battery_update(ns2, raw_data[2]);
+    if (READ_ONCE(ns2->common_input_active))
+        return 0;
+
     switch2_ble_mouse_report_side(ns2, raw_data + 1);
 
     /*
@@ -1157,6 +1163,7 @@ int switch2_input_receive_state(struct switch2_controller *ns2,
         if (size != NS2_BLE_HID_STATE_SIZE)
             return -EINVAL;
 
+        WRITE_ONCE(ns2->common_input_active, true);
         switch2_ble_mouse_report_common(ns2, raw_data, size);
         switch2_ble_common_report_jc1(ns2, raw_data, size);
 

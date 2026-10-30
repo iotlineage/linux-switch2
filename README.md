@@ -354,3 +354,28 @@ GPL-2.0-or-later.
 ## Support
 
 This project is provided as-is. It is not actively developed or supported, and bug reports or feature requests are not currently accepted.
+# Native BLE battery reporting
+
+The ns-os battery branch registers a device-scoped Linux `power_supply` under
+each Bluetooth Joy-Con 2 HID before publishing its gamepad. Native side-report
+Power Info is decoded independently of `jc1_compat`: levels 0..9 map to
+0, 11, 22, 33, 44, 56, 67, 78, 89 and 100 percent. These preserve all ten coarse
+states, not precise charge measurements. Charging and external-power flags
+determine status independently; an unplugged full controller is discharging.
+Until a valid report arrives, capacity is unavailable and status is unknown.
+Reserved levels are ignored. Samples expire after 90 seconds; supply state is
+removed on disconnect. No battery is advertised for unverified USB formats.
+
+Once common input starts, subsequent side reports update battery only so they
+cannot duplicate mouse or motion input. The read-only `native_battery` module
+parameter advertises this capability to the BlueZ transport. Firmware tested
+with this branch does not provide simultaneous side/common notifications or
+direct side-characteristic reads; use the companion BlueZ battery sampler,
+which enables side notifications for one sample every 30 seconds and immediately
+restores common-only notifications, with a one-second recovery timeout.
+
+`cc -Wall -Wextra -Werror tests/test-battery.c -o /tmp/test-battery &&
+/tmp/test-battery` validates all 256 Power Info bytes. The ns-os guest integration
+test additionally exercises both synthetic HIDs, real sysfs properties, invalid
+reports, independent state and disconnect cleanup.
+
