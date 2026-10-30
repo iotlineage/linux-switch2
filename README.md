@@ -378,4 +378,3 @@ restores common-only notifications, with a one-second recovery timeout.
 /tmp/test-battery` validates all 256 Power Info bytes. The ns-os guest integration
 test additionally exercises both synthetic HIDs, real sysfs properties, invalid
 reports, independent state and disconnect cleanup.
-
