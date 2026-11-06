@@ -1,0 +1,271 @@
+diff --git a/net/bluetooth/hci_core.c b/net/bluetooth/hci_core.c
+index 74d9865..3c51c8b 100644
+--- a/net/bluetooth/hci_core.c
++++ b/net/bluetooth/hci_core.c
+@@ -1021,10 +1021,18 @@ void hci_link_keys_clear(struct hci_dev *hdev)
+ 	}
+ }
+ 
++int hci_switch2_add_ltk(struct hci_dev *, bdaddr_t *, u8 key[16]);
++void hci_switch2_free_ltk(struct hci_dev *, struct smp_ltk *);
++void hci_switch2_ltk_identity(struct smp_ltk *, bdaddr_t *, u8);
++
++/* Serialize LTK writers from SMP and management without changing hci_dev ABI. */
++static DEFINE_SPINLOCK(switch2_ltk_lock);
++
+ void hci_smp_ltks_clear(struct hci_dev *hdev)
+ {
+ 	struct smp_ltk *k, *tmp;
+ 
++	guard(spinlock_bh)(&switch2_ltk_lock);
+ 	list_for_each_entry_safe(k, tmp, &hdev->long_term_keys, list) {
+ 		list_del_rcu(&k->list);
+ 		kfree_rcu(k, rcu);
+@@ -1283,7 +1291,7 @@ struct link_key *hci_add_link_key(struct hci_dev *hdev, struct hci_conn *conn,
+ 	return key;
+ }
+ 
+-struct smp_ltk *hci_add_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr,
++static struct smp_ltk *__hci_add_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			    u8 addr_type, u8 type, u8 authenticated,
+ 			    u8 tk[16], u8 enc_size, __le16 ediv, __le64 rand)
+ {
+@@ -1294,10 +1302,9 @@ struct smp_ltk *hci_add_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 	if (old_key)
+ 		key = old_key;
+ 	else {
+-		key = kzalloc_obj(*key);
++		key = kzalloc(sizeof(*key), GFP_ATOMIC);
+ 		if (!key)
+ 			return NULL;
+-		list_add_rcu(&key->list, &hdev->long_term_keys);
+ 	}
+ 
+ 	bacpy(&key->bdaddr, bdaddr);
+@@ -1309,9 +1316,59 @@ struct smp_ltk *hci_add_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 	key->enc_size = enc_size;
+ 	key->type = type;
+ 
++	if (!old_key)
++		list_add_rcu(&key->list, &hdev->long_term_keys);
+ 	return key;
+ }
+ 
++struct smp_ltk *hci_add_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr,
++                          u8 addr_type, u8 type, u8 authenticated,
++                          u8 tk[16], u8 enc_size, __le16 ediv, __le64 rand)
++{
++    guard(spinlock_bh)(&switch2_ltk_lock);
++    return __hci_add_ltk(hdev, bdaddr, addr_type, type, authenticated,
++                        tk, enc_size, ediv, rand);
++}
++
++/* No replacement, removal, list reload, HCI traffic or connection reset. */
++int hci_switch2_add_ltk(struct hci_dev *hdev, bdaddr_t *peer, u8 key[16])
++{
++    struct smp_ltk *ltk;
++    guard(spinlock_bh)(&switch2_ltk_lock);
++    list_for_each_entry(ltk, &hdev->long_term_keys, list) {
++        if (ltk->bdaddr_type != ADDR_LE_DEV_PUBLIC || bacmp(peer, &ltk->bdaddr))
++            continue;
++        if (ltk->type == SMP_LTK && !ltk->authenticated &&
++            ltk->enc_size == 16 && !ltk->ediv && !ltk->rand &&
++            !memcmp(ltk->val, key, 16))
++            return 0;
++        return -EEXIST;
++    }
++    if (hci_conn_hash_lookup_le(hdev, peer, ADDR_LE_DEV_PUBLIC))
++        return -EBUSY;
++    return __hci_add_ltk(hdev, peer, ADDR_LE_DEV_PUBLIC, SMP_LTK,
++                        0, key, 16, 0, 0) ? 0 : -ENOMEM;
++}
++
++void hci_switch2_ltk_identity(struct smp_ltk *key, bdaddr_t *peer, u8 type)
++{
++    guard(spinlock_bh)(&switch2_ltk_lock);
++    key->bdaddr_type = type;
++    bacpy(&key->bdaddr, peer);
++}
++
++void hci_switch2_free_ltk(struct hci_dev *hdev, struct smp_ltk *key)
++{
++    struct smp_ltk *candidate;
++    guard(spinlock_bh)(&switch2_ltk_lock);
++    list_for_each_entry(candidate, &hdev->long_term_keys, list) {
++        if (candidate != key) continue;
++        list_del_rcu(&candidate->list);
++        kfree_rcu(candidate, rcu);
++        break;
++    }
++}
++
+ struct smp_irk *hci_add_irk(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			    u8 addr_type, u8 val[16], bdaddr_t *rpa)
+ {
+@@ -1356,6 +1413,7 @@ int hci_remove_ltk(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 bdaddr_type)
+ 	struct smp_ltk *k, *tmp;
+ 	int removed = 0;
+ 
++	guard(spinlock_bh)(&switch2_ltk_lock);
+ 	list_for_each_entry_safe(k, tmp, &hdev->long_term_keys, list) {
+ 		if (bacmp(bdaddr, &k->bdaddr) || k->bdaddr_type != bdaddr_type)
+ 			continue;
+diff --git a/net/bluetooth/hci_event.c b/net/bluetooth/hci_event.c
+index d8e7c27..39ea312 100644
+--- a/net/bluetooth/hci_event.c
++++ b/net/bluetooth/hci_event.c
+@@ -33,6 +33,8 @@
+ #include "hci_debugfs.h"
+ #include "hci_codec.h"
+ #include "smp.h"
++
++void hci_switch2_free_ltk(struct hci_dev *, struct smp_ltk *);
+ #include "msft.h"
+ #include "eir.h"
+ 
+@@ -6804,8 +6806,7 @@ static void hci_le_ltk_request_evt(struct hci_dev *hdev, void *data,
+ 	 */
+ 	if (ltk->type == SMP_STK) {
+ 		set_bit(HCI_CONN_STK_ENCRYPT, &conn->flags);
+-		list_del_rcu(&ltk->list);
+-		kfree_rcu(ltk, rcu);
++		hci_switch2_free_ltk(hdev, ltk);
+ 	} else {
+ 		clear_bit(HCI_CONN_STK_ENCRYPT, &conn->flags);
+ 	}
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index 251a896..fc5777c 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -40,7 +40,10 @@
+ #define MGMT_VERSION	1
+ #define MGMT_REVISION	23
+ 
++/* Project extension; UUID handshake prevents accidental opcode collision. */
++#define MGMT_OP_SWITCH2_KEY 0x0100
+ static const u16 mgmt_commands[] = {
++	MGMT_OP_SWITCH2_KEY,
+ 	MGMT_OP_READ_INDEX_LIST,
+ 	MGMT_OP_READ_INFO,
+ 	MGMT_OP_SET_POWERED,
+@@ -7402,6 +7405,12 @@ static int load_long_term_keys(struct sock *sk, struct hci_dev *hdev,
+ 
+ 	hci_dev_lock(hdev);
+ 
++    /* SMP channels retain LTK pointers. Do not invalidate them during pairing. */
++    if (hci_conn_num(hdev, LE_LINK) || hci_conn_num(hdev, ACL_LINK)) {
++        hci_dev_unlock(hdev);
++        return mgmt_cmd_status(sk, hdev->id, MGMT_OP_LOAD_LONG_TERM_KEYS,
++                               MGMT_STATUS_BUSY);
++    }
+ 	hci_smp_ltks_clear(hdev);
+ 
+ 	for (i = 0; i < key_count; i++) {
+@@ -9601,6 +9610,43 @@ static int get_adv_size_info(struct sock *sk, struct hci_dev *hdev,
+ 				 MGMT_STATUS_SUCCESS, &rp, sizeof(rp));
+ }
+ 
++extern int hci_switch2_add_ltk(struct hci_dev *hdev, bdaddr_t *peer, u8 key[16]);
++struct switch2_key_request {
++    u8 magic[16], operation, address[6], key[16];
++} __packed;
++static u8 switch2_key_magic[16] = {
++    0x85,0x19,0xa2,0x14,0x69,0x2b,0x43,0xc5,
++    0xb8,0x72,0x7e,0x06,0x58,0xe2,0x10,0x01
++};
++static int switch2_key(struct sock *sk, struct hci_dev *hdev, void *data, u16 len)
++{
++    struct switch2_key_request *cp = data;
++    bdaddr_t peer;
++    u8 status = MGMT_STATUS_SUCCESS;
++    int err = 0;
++    if (memcmp(cp->magic, switch2_key_magic, sizeof(cp->magic)) || cp->operation > 1)
++        return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SWITCH2_KEY, MGMT_STATUS_INVALID_PARAMS);
++    if (!lmp_le_capable(hdev))
++        return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SWITCH2_KEY, MGMT_STATUS_NOT_SUPPORTED);
++    if (cp->operation) {
++        memcpy(&peer, cp->address, sizeof(peer));
++        if (!bacmp(&peer, BDADDR_ANY) || !bacmp(&peer, BDADDR_NONE))
++            return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SWITCH2_KEY, MGMT_STATUS_INVALID_PARAMS);
++        hci_dev_lock(hdev);
++        if (hci_dev_test_flag(hdev, HCI_UNREGISTER))
++            err = -ENODEV;
++        else if (hci_is_blocked_key(hdev, HCI_BLOCKED_KEY_TYPE_LTK, cp->key))
++            err = -EPERM;
++        else
++            err = hci_switch2_add_ltk(hdev, &peer, cp->key);
++        hci_dev_unlock(hdev);
++        if (err == -EEXIST) status = MGMT_STATUS_ALREADY_PAIRED;
++        else if (err) status = mgmt_errno_status(err);
++    }
++    return mgmt_cmd_complete(sk, hdev->id, MGMT_OP_SWITCH2_KEY, status,
++                             switch2_key_magic, sizeof(switch2_key_magic));
++}
++
+ static const struct hci_mgmt_handler mgmt_handlers[] = {
+ 	{ NULL }, /* 0x0000 (no command) */
+ 	{ read_version,            MGMT_READ_VERSION_SIZE,
+@@ -9736,6 +9782,7 @@ static const struct hci_mgmt_handler mgmt_handlers[] = {
+ 	{ mgmt_hci_cmd_sync,       MGMT_HCI_CMD_SYNC_SIZE, HCI_MGMT_VAR_LEN },
+ 	{ load_conn_subrate,       MGMT_LOAD_CONN_SUBRATE_SIZE,
+ 						HCI_MGMT_VAR_LEN },
++	[MGMT_OP_SWITCH2_KEY] = { switch2_key, sizeof(struct switch2_key_request) },
+ };
+ 
+ void mgmt_index_added(struct hci_dev *hdev)
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 2df303f..7eac62e 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -32,6 +32,9 @@
+ #include "ecdh_helper.h"
+ #include "smp.h"
+ 
++void hci_switch2_free_ltk(struct hci_dev *, struct smp_ltk *);
++void hci_switch2_ltk_identity(struct smp_ltk *, bdaddr_t *, u8);
++
+ #define SMP_DEV(hdev) \
+ 	((struct smp_dev *)((struct l2cap_chan *)((hdev)->smp_data))->data)
+ 
+@@ -745,21 +748,18 @@ static void smp_chan_destroy(struct l2cap_conn *conn)
+ 	 */
+ 	if (smp->ltk && smp->ltk->type == SMP_LTK_P256_DEBUG &&
+ 	    !hci_dev_test_flag(hcon->hdev, HCI_KEEP_DEBUG_KEYS)) {
+-		list_del_rcu(&smp->ltk->list);
+-		kfree_rcu(smp->ltk, rcu);
++		hci_switch2_free_ltk(hcon->hdev, smp->ltk);
+ 		smp->ltk = NULL;
+ 	}
+ 
+ 	/* If pairing failed clean up any keys we might have */
+ 	if (!complete) {
+ 		if (smp->ltk) {
+-			list_del_rcu(&smp->ltk->list);
+-			kfree_rcu(smp->ltk, rcu);
++			hci_switch2_free_ltk(hcon->hdev, smp->ltk);
+ 		}
+ 
+ 		if (smp->responder_ltk) {
+-			list_del_rcu(&smp->responder_ltk->list);
+-			kfree_rcu(smp->responder_ltk, rcu);
++			hci_switch2_free_ltk(hcon->hdev, smp->responder_ltk);
+ 		}
+ 
+ 		if (smp->remote_irk) {
+@@ -1068,14 +1068,12 @@ static void smp_notify_keys(struct l2cap_conn *conn)
+ 	}
+ 
+ 	if (smp->ltk) {
+-		smp->ltk->bdaddr_type = hcon->dst_type;
+-		bacpy(&smp->ltk->bdaddr, &hcon->dst);
++		hci_switch2_ltk_identity(smp->ltk, &hcon->dst, hcon->dst_type);
+ 		mgmt_new_ltk(hdev, smp->ltk, persistent);
+ 	}
+ 
+ 	if (smp->responder_ltk) {
+-		smp->responder_ltk->bdaddr_type = hcon->dst_type;
+-		bacpy(&smp->responder_ltk->bdaddr, &hcon->dst);
++		hci_switch2_ltk_identity(smp->responder_ltk, &hcon->dst, hcon->dst_type);
+ 		mgmt_new_ltk(hdev, smp->responder_ltk, persistent);
+ 	}
+ 
